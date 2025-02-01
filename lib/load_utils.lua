@@ -41,4 +41,80 @@ function load_utils.load_with_fenv(r_path)
 	return loadfile(load_utils.absolute(r_path, 1), "bt", getfenv(2))()
 end
 
+function load_utils.load(directory_name, recursive)
+   directory_name = directory_name:gsub("%.", "/")
+
+   local items = {}
+   local function recurse(items, directory_name)
+      for _, item in pairs(love.filesystem.getDirectoryItems(directory_name)) do
+         local path = ("%s/%s"):format(directory_name, item)
+         local info = love.filesystem.getInfo(path)
+         if info.type == "file" then
+            table.insert(items, path)
+         elseif info.type == "directory" and recursive == true then
+            recurse(items, path)
+         end
+      end
+   end
+
+   recurse(items, directory_name)
+
+   local i = 0
+   return function()
+      i = i + 1
+      if i > #items then return end
+
+      local path = items[i]
+      local directory = path:match(".+/")
+      -- local extension = path:gsub(path:match("^.-%."):sub(1, -2), "")
+
+      local extension = path:match("^.+(%..+)$")
+
+      local name = path:gsub(directory, ""):gsub(extension, "")
+
+      return path, directory, name, extension
+   end
+end
+
+function load_utils.search(search_name, directory_name)
+   local search_item
+   local function recurse(directory_name)
+      for _, item in pairs(love.filesystem.getDirectoryItems(directory_name)) do
+         local path = ("%s/%s"):format(directory_name, item)
+         local info = love.filesystem.getInfo(path)
+         if info.type == "file" then
+
+            local directory = path:match(".+/")
+            local extension = path:gsub(path:match("^.-%."):sub(1, -2), "")
+            local name = path:gsub(directory, ""):gsub(extension, "")
+
+            if search_name == name then
+               search_item = path
+               break
+            end
+
+         elseif info.type == "directory" and recursive == true then
+            recurse(items, path)
+         end
+      end
+   end
+
+   recurse(directory_name)
+
+   local path = search_item
+   local directory = path:match(".+/")
+   local extension = path:gsub(path:match("^.-%."):sub(1, -2), "")
+   local name = path:gsub(directory, ""):gsub(extension, "")
+
+   return directory..name
+end
+
+function load_utils.path_splitter(path)
+   local directory = path:match(".+/")
+   local extension = path:gsub(path:match("^.-%."):sub(1, -2), "")
+   local name = path:gsub(directory, ""):gsub(extension, "")
+
+	return directory, name, extension
+end
+
 return load_utils
