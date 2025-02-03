@@ -11,6 +11,18 @@ local function path_splitter(path)
 	return directory, name, extension
 end
 
+local flip_x = {
+	[0] = 1,
+	[1] = -1,
+	[2] = 1,
+	[3] = -1
+}
+local flip_y = {
+	[0] = 1,
+	[1] = 1,
+	[2] = -1,
+	[3] = -1
+}
 
 --[[
 	TODO:
@@ -42,11 +54,7 @@ end
 
 	I want to handle separate, connected, and seamless levels
 
-	should I collapse all the layers into level?
-	There is definitely per layer information but I wonder if that can't be associated
-	with the level or grid/tiles/entities inside
-	If the user collapses the information for their own use they will lose a lot of implicit
-	stuff
+	I prefer having everything separated but provided an option to output layers could be good
 ]]
 
 -- https://ldtk.io/json/#overview
@@ -57,14 +65,13 @@ function LDTK:__new(path)
 	local directory, _, _ = path_splitter(path)
 	self.path, self.directory = path, directory
 	self.data = json.decode(love.filesystem.read(path))
-
-	self.defs = self:_map_definitions()
-
 	self:_check_to_load_external_levels()
 
-	self:_texture_storage()
+	self.defs = self:_map_definitions()
+	self.textures = self:_texture_storage()
 
-	self:_process_level_data()
+	self.entities = {}
+	self.levels = self:_process_level_data()
 
 	return self
 end
@@ -97,35 +104,30 @@ function LDTK:_check_to_load_external_levels()
 end
 
 function LDTK:_texture_storage()
-	self.textures = {}
+	local textures = {}
 	for _, texture_def in pairs(self.data.defs.tilesets) do
 		if texture_def.relPath then
 			local texture_path = self.directory..texture_def.relPath
-			self.textures[texture_def.relPath] = love.graphics.newImage(texture_path)
+			textures[texture_def.relPath] = love.graphics.newImage(texture_path)
 		end
 	end
+
+	return textures
 end
 
 function LDTK:_process_level_data()
-	self.levels = {}
-	self.entities = {}
+	local levels = {}
 
 	for _, level_data in ipairs(self.data.levels) do
 		local level = self:_new_level(level_data)
-		table.insert(self.levels, level)
-		self.levels[level.id] = level
+		table.insert(levels, level)
+		levels[level.id] = level
 	end
-end
 
-function LDTK:_new_world()
-	-- I don't know if I want to do this, would it get in the way of segmented loading?
+	return levels
 end
 
 function LDTK:_new_level(level_data)
-	--[[
-		create a level that refers to a mt for convenience functions like draw
-		This also doubles as a clear documentation of level fields
-	--]]
 	local level = {
 		id = level_data.identifier,
 
@@ -135,133 +137,137 @@ function LDTK:_new_level(level_data)
 
 		background_color = {self:_hex_to_rgb(level_data.__bgColor)},
 
-		layers = {}
+		entities = self:_new_entities(level_data),
+		tiles = self:_new_tiles(level_data),
+		grids = self:_new_grids(level_data)
 	}
-
-	-- ripairs because layer_data is sorted by reverse draw order
-	for _, layer_data in batteries.tablex.ripairs(level_data.layerInstances) do
-		local layer = self:_new_layer(layer_data)
-		table.insert(level.layers, layer)
-	end
-
 	return level
 end
 
-function LDTK:_new_layer(layer_data)
-	local layer = {
-		x = layer_data.__pxTotalOffsetX,
-		y = layer_data.__pxTotalOffsetY,
-
-		grid_size = layer_data.__gridSize,
-		grid_width = layer_data.__cWid,
-		grid_height = layer_data.__cHei,
-
-		entities = self:_new_layer_entities(layer_data),
-		tiles = self:_new_layer_tiles(layer_data),
-		grid = self:_new_layer_grid(layer_data)
-	}
-
-	return layer
-end
-
-function LDTK:_new_layer_entities(layer_data)
-	if #layer_data.entityInstances == 0 then
-		return {}
-	end
-
+function LDTK:_new_entities(level_data)
 	local entities = {}
-	for _, entity_data in ipairs(layer_data.entityInstances) do
-		local entity = self:_new_entity(entity_data, layer_data)
-		table.insert(entities, entity)
+
+	for layer_index, layer_data in batteries.tablex.ripairs(level_data.layerInstances) do
+		for _, entity_data in ipairs(layer_data.entityInstances) do
+			table.insert(entities, self:_new_entity(entity_data, layer_index, layer_data, level_data))
+		end
 	end
+
 	return entities
 end
+function LDTK:_new_entity(entity_data, layer_index, layer_data, level_data)
+	local entity = {
+		identifier = entity_data.__identifier,
+		iid = entity_data.iid,
 
-function LDTK:_new_layer_tiles(layer_data)
-	if #layer_data.autoLayerTiles == 0 and #layer_data.gridTiles == 0 then
-		return {}
-	end
+		translation = {
+			level = {level_data.worldX, level_data.worldY},
+			layer = {layer_data.__pxTotalOffsetX, layer_data.__pxTotalOffsetY},
+			object = {
+				entity_data.px[1] - (entity_data.width * entity_data.__pivot[1]),
+				entity_data.px[2] - (entity_data.height * entity_data.__pivot[2]),
+			}
+		},
 
-	local tiles = {}
-	for _, tile_data in ipairs(layer_data.autoLayerTiles) do
-		table.insert(tiles, self:_new_tile(tile_data, layer_data))
-	end
-	for _, tile_data in ipairs(layer_data.gridTiles) do
-		table.insert(tiles, self:_new_tile(tile_data, layer_data))
-	end
-	return tiles
+		z_level = {
+			level = level_data.worldDepth,
+			layer = layer_index,
+		},
+
+		dimensions = {entity_data.width, entity_data.height},
+
+		texture = self:_texture_from_tileRect(entity_data.__tile),
+		quad = self:_quad_from_tileRect(entity_data.__tile),
+
+		tags = self:_tag_array_to_map(entity_data.__tags),
+		fields = self:_convert_fields(entity_data.fieldInstances),
+	}
+
+	self.entities[entity.iid] = entity
+	return entity
 end
 
-function LDTK:_new_layer_grid(layer_data)
-	if #layer_data.intGridCsv == 0 then
-		return {}
+function LDTK:_new_tiles(level_data)
+	local tiles = {}
+
+	for layer_index, layer_data in batteries.tablex.ripairs(level_data.layerInstances) do
+		for _, tile_data in ipairs(layer_data.autoLayerTiles) do
+			table.insert(tiles, self:_new_tile(tile_data, layer_index, layer_data, level_data))
+		end
+		for _, tile_data in ipairs(layer_data.gridTiles) do
+			table.insert(tiles, self:_new_tile(tile_data, layer_index, layer_data, level_data))
+		end
 	end
 
+	return tiles
+end
+function LDTK:_new_tile(tile_data, layer_index, layer_data, level_data)
+	local tileset_def = self.defs.tilesets[layer_data.__tilesetDefUid]
+
+	local tile = {
+		translation = {
+			level = {level_data.worldX, level_data.worldY},
+			layer = {layer_data.__pxTotalOffsetX, layer_data.__pxTotalOffsetY},
+			object = {tile_data.px[1], tile_data.px[2]}
+		},
+
+		z_level = {
+			level = level_data.worldDepth,
+			layer = layer_index,
+		},
+
+		texture = self.textures[layer_data.__tilesetRelPath],
+		quad = love.graphics.newQuad(
+			tile_data.src[1], tile_data.src[2],
+			tileset_def.tileGridSize, tileset_def.tileGridSize,
+			tileset_def.pxWid, tileset_def.pxHei
+		),
+
+		dimensions = {tileset_def.tileGridSize, tileset_def.tileGridSize},
+		mirror = {flip_x[tile_data.f], flip_y[tile_data.f]}
+	}
+
+	return tile
+end
+
+function LDTK:_new_grids(level_data)
+	local grids = {}
+
+	for layer_index, layer_data in batteries.tablex.ripairs(level_data.layerInstances) do
+		table.insert(grids, self:_new_grid(layer_data.intGridCsv, layer_index, layer_data, level_data))
+	end
+
+	return grids
+end
+function LDTK:_new_grid(grid_data, layer_index, layer_data, level_data)
 	local grid = {
+		translation = {
+			level = {level_data.worldX, level_data.worldY},
+			layer = {layer_data.__pxTotalOffsetX, layer_data.__pxTotalOffsetY},
+		},
+
+		z_level = {
+			level = level_data.worldDepth,
+			layer = layer_index,
+		},
+
 		map = {},
-		array = {}
+		array = {},
+
+		cell_size = layer_data.__gridSize,
+		dimensions = {layer_data.__cWid, layer_data.__cHei},
 	}
 	for _, intGridValue in ipairs(self.defs.layers[layer_data.layerDefUid].intGridValues) do
 		grid.map[intGridValue.value] = {
+			id = intGridValue.identifier,
 			color = {self:_hex_to_rgb(intGridValue.color)}
 		}
 	end
 	for i, v in ipairs(layer_data.intGridCsv) do
 		grid.array[i] = v
 	end
+
 	return grid
-end
-
-local flip_x = {
-	[0] = 1,
-	[1] = -1,
-	[2] = 1,
-	[3] = -1
-}
-local flip_y = {
-	[0] = 1,
-	[1] = 1,
-	[2] = -1,
-	[3] = -1
-}
-function LDTK:_new_tile(tile_data, layer_data)
-	local tile = {}
-
-	local tileset_def = self.defs.tilesets[layer_data.__tilesetDefUid]
-
-	local quad_x, quad_y = unpack(tile_data.src)
-	local quad_w, quad_h = tileset_def.tileGridSize, tileset_def.tileGridSize
-	local quad_tex_w, quad_tex_h = tileset_def.pxWid, tileset_def.pxHei
-	local quad = love.graphics.newQuad(quad_x, quad_y, quad_w, quad_h, quad_tex_w, quad_tex_h)
-
-	tile.texture = self.textures[layer_data.__tilesetRelPath]
-	tile.quad = quad
-	tile.x, tile.y = tile_data.px[1], tile_data.px[2]
-	tile.w, tile.h = quad_w, quad_h
-	tile.sx, tile.sy = flip_x[tile_data.f], flip_y[tile_data.f]
-	tile.ox, tile.oy = quad_w/2, quad_h/2
-
-	return tile
-end
-
-function LDTK:_new_entity(entity_data, layer_data)
-	local entity = {
-		identifier = entity_data.__identifier,
-		iid = entity_data.iid,
-
-		x = entity_data.px[1] - (entity_data.width * entity_data.__pivot[1]),
-		y = entity_data.px[2] - (entity_data.height * entity_data.__pivot[2]),
-		w = entity_data.width,
-		h = entity_data.height,
-
-		texture = self:_texture_from_tileRect(entity_data.__tile),
-		quad = self:_quad_from_tileRect(entity_data.__tile),
-
-		fields = self:_convert_fields(entity_data.fieldInstances)
-	}
-
-	self.entities[entity.iid] = entity
-	return entity
 end
 
 function LDTK:_texture_from_tileRect(tileRect)
@@ -279,6 +285,14 @@ function LDTK:_quad_from_tileRect(tileRect)
 
 	local tileset_def = self.defs.tilesets[tileRect.tilesetUid]
 	return love.graphics.newQuad(tileRect.x, tileRect.y, tileRect.w, tileRect.h, tileset_def.pxWid, tileset_def.pxHei)
+end
+
+function LDTK:_tag_array_to_map(tag_array)
+	local tag_map = {}
+	for _, tag_key in ipairs(tag_array) do
+		tag_map[tag_key] = true
+	end
+	return tag_map
 end
 
 function LDTK:_convert_fields(fieldInstances)
@@ -352,64 +366,12 @@ function LDTK:get_level(id)
 	return self.levels[id]
 end
 
-function LDTK:draw_world()
-	for i, level in ipairs(self.levels) do
-		if self.levels[i].z == 0 then
-			self:draw_level(i)
-		end
-	end
+function LDTK:get_layer()
+
 end
-function LDTK:draw_level(i)
-	local level = self.levels[i]
+function LDTK:get_entity()
 
-	love.graphics.push("all")
-
-	-- need to think about if I should implicitly translate all the elements based on the level/layer coordinates
-	love.graphics.translate(level.x, level.y)
-
-	love.graphics.setBackgroundColor(unpack(level.background_color))
-
-	for _, layer in ipairs(level.layers) do
-		love.graphics.push("all")
-		love.graphics.translate(layer.x, layer.y)
-
-		if layer.tiles then
-			for _, tile in ipairs(layer.tiles) do
-				-- love.graphics.rectangle("line", tile.x, tile.y, 16, 16)
-				love.graphics.draw(tile.texture, tile.quad, tile.x + tile.w/2, tile.y + tile.h/2, 0, tile.sx, tile.sy, tile.ox, tile.oy)
-			end
-		end
-
-		if layer.entities then
-			for _, entity in ipairs(layer.entities) do
-				if entity.texture then
-					love.graphics.draw(entity.texture, entity.quad, entity.x, entity.y)
-				else
-					love.graphics.rectangle("fill", entity.x, entity.y, entity.w, entity.h)
-				end
-			end
-		end
-
-		if layer.grid then
-			-- self:_draw_grid(layer)
-		end
-
-		love.graphics.pop()
-	end
-
-	love.graphics.pop()
 end
-function LDTK:_draw_grid(layer)
-	love.graphics.push("all")
-	for i, v, x, y, w, h in self:iterate_grid(layer) do
-		if v ~= 0 then
-			love.graphics.setColor(layer.grid.map[v].color)
-			love.graphics.rectangle("fill", x, y, w, h)
-		end
-	end
-	love.graphics.pop()
-end
-
 
 local function _index_to_coordinates(i, w, h)
 	local x = i % w
@@ -420,20 +382,76 @@ end
 local function _grid_iter(t, i)
 	i = i + 1
 
-	if t.grid.array == nil then return end
-	local v = t.grid.array[i]
+	local v = t.array[i]
 
 	if v then
-		local grid_w, grid_h = t.grid_width, t.grid_height
+		local grid_w, grid_h = t.dimensions[1], t.dimensions[2]
 		local x, y = _index_to_coordinates(i - 1, grid_w, grid_h)
-		local w, h = t.grid_size, t.grid_size
+		local w, h = t.cell_size, t.cell_size
 
 		return i, v, x * w, y * h, w, h
 	end
 end
-function LDTK:iterate_grid(layer)
-	return _grid_iter, layer, 0
+function LDTK:iterate_grid(grid)
+	return _grid_iter, grid, 0
 end
+
+function LDTK:draw()
+	for _, level in ipairs(self.levels) do
+		for _, grid in ipairs(level.grids) do
+			local t_x, t_y = 0, 0
+			for _, translation in pairs(grid.translation) do
+				t_x = t_x + translation[1]
+				t_y = t_y + translation[2]
+			end
+
+			for i, v, x, y, w, h in self:iterate_grid(grid) do
+				if v ~= 0 then
+					love.graphics.push("all")
+					love.graphics.setColor(grid.map[v].color)
+					love.graphics.rectangle("fill", x + t_x, y + t_y, w, h)
+					love.graphics.pop()
+				end
+			end
+		end
+
+		for _, tile in tablex.ripairs(level.tiles) do
+			local x, y = 0, 0
+			for _, translation in pairs(tile.translation) do
+				x = x + translation[1]
+				y = y + translation[2]
+			end
+
+			local x = x + tile.dimensions[1]/2
+			local y = y + tile.dimensions[2]/2
+			local r = 0
+			local sx = tile.mirror[1]
+			local sy = tile.mirror[2]
+			local ox = tile.dimensions[1]/2
+			local oy = tile.dimensions[2]/2
+
+			love.graphics.draw(tile.texture, tile.quad, x, y, r, sx, sy, ox, oy)
+		end
+
+		for _, entity in ipairs(level.entities) do
+			local x, y = 0, 0
+			for _, translation in pairs(entity.translation) do
+				x = x + translation[1]
+				y = y + translation[2]
+			end
+
+			if entity.texture then
+				love.graphics.draw(entity.texture, entity.quad, x, y)
+			else
+				love.graphics.rectangle("fill", x, y, entity.dimensions[1], entity.dimensions[2])
+			end
+		end
+	end
+end
+
+-- write a function to output a pretty entity?
+
+
 
 
 
