@@ -41,6 +41,12 @@ end
 	This library should be concerned with organizing and fetching the ldtk data
 
 	I want to handle separate, connected, and seamless levels
+
+	should I collapse all the layers into level?
+	There is definitely per layer information but I wonder if that can't be associated
+	with the level or grid/tiles/entities inside
+	If the user collapses the information for their own use they will lose a lot of implicit
+	stuff
 ]]
 
 -- https://ldtk.io/json/#overview
@@ -52,7 +58,7 @@ function LDTK:__new(path)
 	self.path, self.directory = path, directory
 	self.data = json.decode(love.filesystem.read(path))
 
-	self:_map_definitions()
+	self.defs = self:_map_definitions()
 
 	self:_check_to_load_external_levels()
 
@@ -65,13 +71,15 @@ end
 
 function LDTK:_map_definitions()
 	-- Create my own copy of definitions for easier searching
-	self.defs = {}
+	local defs = {}
 	for k, defintion_groups in pairs(self.data.defs) do
-		self.defs[k] = {}
+		defs[k] = {}
 		for _, def in ipairs(defintion_groups) do
-			self.defs[k][def.uid] = def
+			defs[k][def.uid] = def
 		end
 	end
+
+	return defs
 end
 
 function LDTK:_check_to_load_external_levels()
@@ -158,7 +166,7 @@ end
 
 function LDTK:_new_layer_entities(layer_data)
 	if #layer_data.entityInstances == 0 then
-		return
+		return {}
 	end
 
 	local entities = {}
@@ -171,7 +179,7 @@ end
 
 function LDTK:_new_layer_tiles(layer_data)
 	if #layer_data.autoLayerTiles == 0 and #layer_data.gridTiles == 0 then
-		return
+		return {}
 	end
 
 	local tiles = {}
@@ -186,7 +194,7 @@ end
 
 function LDTK:_new_layer_grid(layer_data)
 	if #layer_data.intGridCsv == 0 then
-		return
+		return {}
 	end
 
 	local grid = {
@@ -237,22 +245,44 @@ function LDTK:_new_tile(tile_data, layer_data)
 end
 
 function LDTK:_new_entity(entity_data, layer_data)
-	local entity = {}
+	local entity = {
+		identifier = entity_data.__identifier,
+		iid = entity_data.iid,
 
-	entity.identifier = entity_data.__identifier
-	entity.iid = entity_data.iid
+		x = entity_data.px[1] - (entity_data.width * entity_data.__pivot[1]),
+		y = entity_data.px[2] - (entity_data.height * entity_data.__pivot[2]),
+		w = entity_data.width,
+		h = entity_data.height,
 
-	entity.w, entity.h = entity_data.width, entity_data.height
-	entity.x = entity_data.px[1] - (entity_data.width * entity_data.__pivot[1])
-	entity.y = entity_data.px[2] - (entity_data.height * entity_data.__pivot[2])
+		texture = self:_texture_from_tileRect(entity_data.__tile),
+		quad = self:_quad_from_tileRect(entity_data.__tile),
 
-	if entity_data.tile then
-		local tileset_def = self.definitions[v.tilesetUid]
-		entity.tile = {
-			texture = self.textures[tileset_def.relPath],
-			quad = love.graphics.newQuad(v.x, v.y, v.w, v.h, tileset_def.pxWid, tileset_def.pxHei)
-		}
+		fields = self:_convert_fields(entity_data.fieldInstances)
+	}
+
+	self.entities[entity.iid] = entity
+	return entity
+end
+
+function LDTK:_texture_from_tileRect(tileRect)
+	if not tileRect then
+		return
 	end
+
+	local tileset_def = self.defs.tilesets[tileRect.tilesetUid]
+	return self.textures[tileset_def.relPath]
+end
+function LDTK:_quad_from_tileRect(tileRect)
+	if not tileRect then
+		return
+	end
+
+	local tileset_def = self.defs.tilesets[tileRect.tilesetUid]
+	return love.graphics.newQuad(tileRect.x, tileRect.y, tileRect.w, tileRect.h, tileset_def.pxWid, tileset_def.pxHei)
+end
+
+function LDTK:_convert_fields(fieldInstances)
+	local fields = {}
 
 	local field_type_conversions = {
 		["Color"] = function (v)
@@ -288,29 +318,27 @@ function LDTK:_new_entity(entity_data, layer_data)
 		end
 	end
 
-	entity.fields = {}
-	for _, field_data in pairs(entity_data.fieldInstances) do
+	for _, field_data in pairs(fieldInstances) do
 		local type = field_data.__type
 		local id = field_data.__identifier
 		local value = field_data.__value
-		print(id, type, value)
+		-- print(id, type, value)
 
 
 		if value ~= nil then
 			if string.find(type, "Array") then
-				entity.fields[id] = {}
+				fields[id] = {}
 
 				for i, v in ipairs(value) do
-					convert(entity.fields[id], type, i, v)
+					convert(fields[id], type, i, v)
 				end
 			else
-				convert(entity.fields, type, id, value)
+				convert(fields, type, id, value)
 			end
 		end
 	end
 
-	self.entities[entity.iid] = entity
-	return entity
+	return fields
 end
 
 function LDTK:_hex_to_rgb(ldtk_hex)
@@ -354,12 +382,16 @@ function LDTK:draw_level(i)
 
 		if layer.entities then
 			for _, entity in ipairs(layer.entities) do
-				love.graphics.rectangle("fill", entity.x, entity.y, entity.w, entity.h)
+				if entity.texture then
+					love.graphics.draw(entity.texture, entity.quad, entity.x, entity.y)
+				else
+					love.graphics.rectangle("fill", entity.x, entity.y, entity.w, entity.h)
+				end
 			end
 		end
 
 		if layer.grid then
-			self:draw_grid(layer)
+			-- self:_draw_grid(layer)
 		end
 
 		love.graphics.pop()
@@ -367,7 +399,7 @@ function LDTK:draw_level(i)
 
 	love.graphics.pop()
 end
-function LDTK:draw_grid(layer)
+function LDTK:_draw_grid(layer)
 	love.graphics.push("all")
 	for i, v, x, y, w, h in self:iterate_grid(layer) do
 		if v ~= 0 then
@@ -388,6 +420,7 @@ end
 local function _grid_iter(t, i)
 	i = i + 1
 
+	if t.grid.array == nil then return end
 	local v = t.grid.array[i]
 
 	if v then
