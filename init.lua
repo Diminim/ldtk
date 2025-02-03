@@ -136,25 +136,55 @@ function LDTK:_new_level(level_data)
 		z = level_data.worldDepth,
 
 		background_color = {self:_hex_to_rgb(level_data.__bgColor)},
-
-		entities = self:_new_entities(level_data),
-		tiles = self:_new_tiles(level_data),
-		grids = self:_new_grids(level_data)
 	}
+	level.layers, level.entities, level.tiles, level.grids = self:_new_layers(level_data)
 	return level
 end
 
-function LDTK:_new_entities(level_data)
+function LDTK:_new_layers(level_data)
+	local layers = {}
 	local entities = {}
+	local tiles = {}
+	local grids = {}
 
 	for layer_index, layer_data in batteries.tablex.ripairs(level_data.layerInstances) do
+		local layer = {
+			id = layer_data.__identifier,
+
+			entities = {},
+			tiles = {},
+			grid = {}
+		}
+		layers[layer.id] = layer
+
 		for _, entity_data in ipairs(layer_data.entityInstances) do
-			table.insert(entities, self:_new_entity(entity_data, layer_index, layer_data, level_data))
+			local entity = self:_new_entity(entity_data, layer_index, layer_data, level_data)
+			table.insert(layer.entities, entity)
+			table.insert(entities, entity)
 		end
+
+		for _, tile_data in ipairs(layer_data.autoLayerTiles) do
+			local tile = self:_new_tile(tile_data, layer_index, layer_data, level_data)
+			table.insert(layer.tiles, tile)
+			table.insert(tiles, tile)
+		end
+		for _, tile_data in ipairs(layer_data.gridTiles) do
+			local tile = self:_new_tile(tile_data, layer_index, layer_data, level_data)
+			table.insert(layer.tiles, tile)
+			table.insert(tiles, tile)
+		end
+
+		do
+			local grid = self:_new_grid(layer_data.intGridCsv, layer_index, layer_data, level_data)
+			layer.grid = grid
+			table.insert(grids, grid)
+		end
+
 	end
 
-	return entities
+	return layers, entities, tiles, grids
 end
+
 function LDTK:_new_entity(entity_data, layer_index, layer_data, level_data)
 	local entity = {
 		identifier = entity_data.__identifier,
@@ -187,20 +217,6 @@ function LDTK:_new_entity(entity_data, layer_index, layer_data, level_data)
 	return entity
 end
 
-function LDTK:_new_tiles(level_data)
-	local tiles = {}
-
-	for layer_index, layer_data in batteries.tablex.ripairs(level_data.layerInstances) do
-		for _, tile_data in ipairs(layer_data.autoLayerTiles) do
-			table.insert(tiles, self:_new_tile(tile_data, layer_index, layer_data, level_data))
-		end
-		for _, tile_data in ipairs(layer_data.gridTiles) do
-			table.insert(tiles, self:_new_tile(tile_data, layer_index, layer_data, level_data))
-		end
-	end
-
-	return tiles
-end
 function LDTK:_new_tile(tile_data, layer_index, layer_data, level_data)
 	local tileset_def = self.defs.tilesets[layer_data.__tilesetDefUid]
 
@@ -216,6 +232,11 @@ function LDTK:_new_tile(tile_data, layer_index, layer_data, level_data)
 			layer = layer_index,
 		},
 
+		grid_coordinates = {
+			tile_data.px[1] / tileset_def.tileGridSize,
+			tile_data.px[2] / tileset_def.tileGridSize
+		},
+
 		texture = self.textures[layer_data.__tilesetRelPath],
 		quad = love.graphics.newQuad(
 			tile_data.src[1], tile_data.src[2],
@@ -228,16 +249,6 @@ function LDTK:_new_tile(tile_data, layer_index, layer_data, level_data)
 	}
 
 	return tile
-end
-
-function LDTK:_new_grids(level_data)
-	local grids = {}
-
-	for layer_index, layer_data in batteries.tablex.ripairs(level_data.layerInstances) do
-		table.insert(grids, self:_new_grid(layer_data.intGridCsv, layer_index, layer_data, level_data))
-	end
-
-	return grids
 end
 function LDTK:_new_grid(grid_data, layer_index, layer_data, level_data)
 	local grid = {
@@ -379,6 +390,11 @@ local function _index_to_coordinates(i, w, h)
 
 	return x, y
 end
+
+local function _coordinates_to_index(x, y, w, h)
+   return x + y * w
+end
+
 local function _grid_iter(t, i)
 	i = i + 1
 
@@ -394,6 +410,11 @@ local function _grid_iter(t, i)
 end
 function LDTK:iterate_grid(grid)
 	return _grid_iter, grid, 0
+end
+
+function LDTK:grid_get(grid, x, y)
+	local i = grid.array[_coordinates_to_index(x, y, grid.dimensions[1]) + 1]
+	return i
 end
 
 function LDTK:draw()
@@ -415,7 +436,7 @@ function LDTK:draw()
 			end
 		end
 
-		for _, tile in tablex.ripairs(level.tiles) do
+		for _, tile in ipairs(level.tiles) do
 			local x, y = 0, 0
 			for _, translation in pairs(tile.translation) do
 				x = x + translation[1]
