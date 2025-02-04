@@ -1,1 +1,0 @@
--- https://ldtk.io/json/#ldtk-FieldInstanceJson
