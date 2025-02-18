@@ -149,7 +149,13 @@ LDTK.__mt = {
 	__index = LDTK
 }
 
-function LDTK:_new(path)
+local defaut_settings = {
+	-- If true: create and store a love.graphics object, else: store path or args for object creation
+	create_graphics_objects = true
+}
+function LDTK:_new(path, settings)
+	self.settings = settings or defaut_settings
+
 	local directory, _, _ = path_splitter(path)
 	self.path, self.directory = path, directory
 	self.data = json.decode(love.filesystem.read(path))
@@ -204,8 +210,13 @@ end
 
 function LDTK:_get_quad(x, y, w, h, tw, th)
 	local id = ("%d:%d:%d:%d:%d:%d"):format(x, y, w, h, tw, th)
+
 	if not self.quads[id] then
-		self.quads[id] = love.graphics.newQuad(x, y, w, h, tw, th)
+		if self.settings["create_graphics_objects"] then
+			self.quads[id] = love.graphics.newQuad(x, y, w, h, tw, th)
+		else
+			self.quads[id] = {x, y, w, h, tw, th, id = id}
+		end
 	end
 
 	return self.quads[id]
@@ -216,7 +227,13 @@ function LDTK:_texture_storage()
 	for _, texture_def in pairs(self.data.defs.tilesets) do
 		if texture_def.relPath then
 			local texture_path = self.directory..texture_def.relPath
-			textures[texture_def.relPath] = love.graphics.newImage(texture_path)
+
+			if self.settings["create_graphics_objects"] then
+				textures[texture_def.relPath] = love.graphics.newImage(texture_path)
+			else
+				textures[texture_def.relPath] = texture_path
+			end
+
 		end
 	end
 
